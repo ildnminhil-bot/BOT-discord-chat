@@ -8,7 +8,7 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 # Khởi tạo OpenAI Client
 ai_client = OpenAI(
-    base_url="https://models.inference.ai.azure.com",
+    base_url="https://models.github.ai/inference",
     api_key=GITHUB_TOKEN,
 )
 
