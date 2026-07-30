@@ -1,32 +1,77 @@
+import os
+import threading
+import discord
+from flask import Flask
+from openai import OpenAI
+from collections import defaultdict, deque
+
+# ==========================================
+# 1. WEB SERVER GIỮ BOT SỐNG (DÀNH CHO RENDER)
+# ==========================================
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Bot đang sống!"
+
+def run_web():
+    web_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+def keep_alive():
+    t = threading.Thread(target=run_web)
+    t.start()
+
+# ==========================================
+# 2. CẤU HÌNH TOKEN VÀ CLIENT
+# ==========================================
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+ai_client = OpenAI(
+    base_url="https://models.github.ai/inference",
+    api_key=GITHUB_TOKEN,
+)
+
+# Bật intents để bot lấy được thông tin Server/Thành viên
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True 
+
+bot_client = discord.Client(intents=intents)
+
+# ==========================================
+# 3. QUẢN LÝ BỘ NHỚ SIÊU NHẸ (CHỐNG TRÀN RAM)
+# ==========================================
+chat_history = defaultdict(lambda: deque(maxlen=10))
+
+@bot_client.event
+async def on_ready():
+    print(f'Bot đã đăng nhập thành công với tên: {bot_client.user}')
+
 @bot_client.event
 async def on_message(message):
+    # Bỏ qua tin nhắn do chính bot gửi
     if message.author == bot_client.user:
         return
 
-    # Chỉ phản hồi khi được tag HOẶC chat trong mục nhắn tin riêng (DM)
+    # Chỉ phản hồi khi được tag HOẶC chat trong mục DM (nhắn tin riêng)
     if bot_client.user in message.mentions or isinstance(message.channel, discord.DMChannel):
         
-        # Lọc bỏ phần tag bot
+        # Lọc bỏ phần tag bot khỏi câu hỏi
         user_text = message.content.replace(f'<@{bot_client.user.id}>', '').strip()
         
-        # ==========================================
-        # TÍNH NĂNG 1: LỆNH "!RESET" GIẢI PHÓNG RAM
-        # ==========================================
+        # --- TÍNH NĂNG 1: LỆNH "!RESET" GIẢI PHÓNG RAM ---
         if user_text.lower() == "!reset":
             chat_history[message.channel.id].clear()
             return await message.reply("🧹 Bíp bíp! Đã xóa sạch trí nhớ cuộc trò chuyện này. RAM trống trơn!")
 
-        # ==========================================
-        # TÍNH NĂNG 2: THẢ EMOJI "ĐANG SUY NGHĨ"
-        # ==========================================
+        # --- TÍNH NĂNG 2: THẢ EMOJI "ĐANG SUY NGHĨ" ---
         try:
             await message.add_reaction("⏳")
         except:
-            pass # Bỏ qua nếu bot chưa được cấp quyền thả reaction trong server
+            pass # Bỏ qua nếu bot chưa có quyền thả reaction
 
-        # ==========================================
-        # TÍNH NĂNG 3: ĐỌC ẢNH & ĐỌC FILE CODE SIÊU NHẸ
-        # ==========================================
+        # --- TÍNH NĂNG 3: ĐỌC ẢNH & ĐỌC FILE TÀI LIỆU ---
         image_urls = []
         text_files_content = ""
 
@@ -35,18 +80,16 @@ async def on_message(message):
             if attachment.content_type and attachment.content_type.startswith('image/'):
                 image_urls.append(attachment.url)
             
-            # Lọc file văn bản/code (txt, py, json, js, html, cpp...)
-            # Chỉ đọc file nhẹ dưới 1MB để không tốn RAM
+            # Lọc file văn bản/code, giới hạn dung lượng và số chữ
             elif attachment.size < 1000000 and attachment.filename.endswith(('.txt', '.py', '.json', '.html', '.md', '.csv', '.js', '.cpp')):
                 try:
                     file_bytes = await attachment.read()
-                    # Chỉ lấy 3000 ký tự đầu tiên để nạp cho AI, chống tràn bộ nhớ
                     text_files_content += f"\n\n--- Nội dung file {attachment.filename} ---\n"
                     text_files_content += file_bytes.decode('utf-8', errors='ignore')[:3000]
                 except Exception as e:
                     print(f"Không thể đọc file: {e}")
 
-        # Gắn text từ file đính kèm vào cuối lời nhắn của người dùng
+        # Gắn text từ file vào cuối lời nhắn
         final_prompt = user_text + text_files_content
         if not final_prompt.strip():
             final_prompt = "Hãy phân tích bức ảnh này giúp tôi." if image_urls else "Chào bạn"
@@ -62,7 +105,7 @@ async def on_message(message):
         # Thêm câu hỏi vào bộ nhớ (Deque)
         chat_history[message.channel.id].append({"role": "user", "content": api_content})
 
-        # Ngữ cảnh Server
+        # --- TẠO NGỮ CẢNH SERVER ---
         server_info = ""
         if message.guild:
             server_info = (f"Bạn đang ở trong server Discord tên '{message.guild.name}'. "
@@ -89,16 +132,14 @@ async def on_message(message):
                 bot_reply = response.choices[0].message.content
                 chat_history[message.channel.id].append({"role": "assistant", "content": bot_reply})
                 
-                # Cắt nhỏ tin nhắn nếu dài hơn 2000 ký tự (Giới hạn của Discord)
+                # Cắt nhỏ tin nhắn nếu dài hơn 2000 ký tự
                 if len(bot_reply) > 2000:
                     for i in range(0, len(bot_reply), 2000):
                         await message.channel.send(bot_reply[i:i+2000])
                 else:
                     await message.reply(bot_reply)
 
-                # ==========================================
-                # HOÀN TẤT: XÓA ⏳ VÀ THAY BẰNG ✅
-                # ==========================================
+                # --- HOÀN TẤT: XÓA ⏳ VÀ THAY BẰNG ✅ ---
                 try:
                     await message.remove_reaction("⏳", bot_client.user)
                     await message.add_reaction("✅")
@@ -113,3 +154,9 @@ async def on_message(message):
                     await message.add_reaction("❌")
                 except:
                     pass
+
+# ==========================================
+# 4. CHẠY BOT
+# ==========================================
+keep_alive()
+bot_client.run(DISCORD_TOKEN)
