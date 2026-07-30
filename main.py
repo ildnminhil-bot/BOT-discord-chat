@@ -1,6 +1,6 @@
 import os
-   import discord
-   from openai import OpenAI
+import discord
+from openai import OpenAI
 
 # Web server giả để Render không tắt bot
 web_app = Flask('')
