@@ -3,11 +3,9 @@ import discord
 from openai import OpenAI
 
 # 1. Cấu hình GitHub AI Key
-GITHUB_TOKEN = "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"
-
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 # 2. Cấu hình Discord Bot Token (Dán token Discord bạn lấy ở bước trước vào đây)
-DISCORD_TOKEN = "DÁN_DISCORD_BOT_TOKEN_CỦA_BẠN_VÀO_ĐÂY"
-
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 # Khởi tạo OpenAI Client
 ai_client = OpenAI(
     base_url="https://models.inference.ai.azure.com",
