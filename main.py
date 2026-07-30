@@ -59,4 +59,5 @@ async def on_message(message):
             await message.channel.send(f"Lỗi rồi ông ơi: {e}")
 
 # Chạy bot
+keep_alive()
 bot_client.run(DISCORD_TOKEN)
