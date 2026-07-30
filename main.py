@@ -1,6 +1,20 @@
 import os
-import discord
-from openai import OpenAI
+import threading
+from flask import Flask
+
+# Web server giả để Render không tắt bot
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Bot đang sống!"
+
+def run_web():
+    web_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+def keep_alive():
+    t = threading.Thread(target=run_web)
+    t.start()
 
 # 1. Cấu hình GitHub AI Key
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
