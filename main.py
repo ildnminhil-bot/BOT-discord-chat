@@ -49,7 +49,7 @@ async def on_message(message):
         try:
             response = ai_client.chat.completions.create(
                 messages=[
-                    {"role": "system", "content": "Bạn là bot Discord cực bựa, hài hước và xì teen."},
+                    {"role": "system", "content": "vui vẻ."},
                     {"role": "user", "content": message.content},
                 ],
                 model="gpt-4o",
