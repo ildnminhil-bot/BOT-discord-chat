@@ -1,5 +1,7 @@
 import os
+import threading
 import discord
+from flask import Flask
 from openai import OpenAI
 
 # Web server giả để Render không tắt bot
