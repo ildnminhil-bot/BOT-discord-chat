@@ -147,7 +147,7 @@ async def on_message(message):
                     pass
 
             except Exception as e:
-                await message.channel.send(f"Lỗi hệ thống rồi ông ơi: {e}")
+                await message.channel.send(f"Lỗi hệ thống: {e}")
                 # Nếu lỗi, đổi reaction thành dấu ❌
                 try:
                     await message.remove_reaction("⏳", bot_client.user)
