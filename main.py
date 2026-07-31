@@ -4,7 +4,6 @@ import discord
 from flask import Flask
 from openai import OpenAI
 from collections import defaultdict, deque
-
 # ==========================================
 # 1. WEB SERVER GIỮ BOT SỐNG (DÀNH CHO RENDER/RAILWAY)
 # ==========================================
