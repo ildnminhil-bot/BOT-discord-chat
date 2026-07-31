@@ -6,7 +6,7 @@ from openai import OpenAI
 from collections import defaultdict, deque
 
 # ==========================================
-# 1. WEB SERVER GIỮ BOT SỐNG (DÀNH CHO RENDER)
+# 1. WEB SERVER GIỮ BOT SỐNG (DÀNH CHO RENDER/RAILWAY)
 # ==========================================
 web_app = Flask('')
 
@@ -27,8 +27,9 @@ def keep_alive():
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Đã cập nhật Endpoint mới của GitHub để tránh lỗi 410
 ai_client = OpenAI(
-    base_url="https://models.github.ai/inference",
+    base_url="https://models.inference.ai.azure.com",
     api_key=GITHUB_TOKEN,
 )
 
