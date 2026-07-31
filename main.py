@@ -20,9 +20,8 @@ def keep_alive():
     t = threading.Thread(target=run_web)
     t.start()
 
-# ==========================================
 # 2. CẤU HÌNH TOKEN VÀ CLIENT
-# ==========================================
+
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -154,9 +153,7 @@ async def on_message(message):
                     await message.add_reaction("❌")
                 except:
                     pass
-
-# ==========================================
 # 4. CHẠY BOT
-# ==========================================
+
 keep_alive()
 bot_client.run(DISCORD_TOKEN)
