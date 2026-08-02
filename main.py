@@ -1,48 +1,38 @@
 import os
 import base64
 import threading
+import time
+import json
+import io
 from collections import defaultdict, deque
-
 import discord
+from discord.ext import commands
+from discord import app_commands
 from flask import Flask
 from openai import OpenAI
 
 # ==========================================
-# 1. WEB SERVER GIỮ BOT SỐNG (DÀNH CHO RENDER/RAILWAY)
+# 1. WEB SERVER GIỮ BOT SỐNG
 # ==========================================
 web_app = Flask('')
-
 
 @web_app.route('/')
 def home():
     return "Bot đang sống!"
 
-
 def run_web():
     web_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
-
 
 def keep_alive():
     threading.Thread(target=run_web, daemon=True).start()
 
-
 # ==========================================
-# 2. CẤU HÌNH TOKEN + 2 CLIENT: GEMINI VÀ GROQ (ĐÃ BỎ HẲN GITHUB)
+# 2. CẤU HÌNH TOKEN + CLIENT
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not GEMINI_API_KEY:
-    print("⚠️  Thiếu biến môi trường GEMINI_API_KEY - lệnh !gemini sẽ báo lỗi.")
-if not GROQ_API_KEY:
-    print("⚠️  Thiếu biến môi trường GROQ_API_KEY - lệnh !groq sẽ báo lỗi.")
-
-# Lý do lỗi 410: endpoint cũ models.inference.ai.azure.com (GitHub Models) đã bị
-# GitHub khai tử HẲN từ 17/10/2025, gọi vào chỉ nhận lỗi 410 vĩnh viễn, không có
-# cách sửa nào khác ngoài chuyển sang nhà cung cấp khác -> đây là lý do đổi sang
-# Gemini + Groq bên dưới, cả hai đều tương thích thư viện "openai" nên code gọi
-# API gần như giữ nguyên, chỉ đổi base_url/model.
 gemini_client = OpenAI(
     api_key=GEMINI_API_KEY,
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -52,121 +42,255 @@ groq_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
 )
 
-# Model dùng cho từng hãng - đổi ở đây nếu sau này muốn dùng bản khác
 PROVIDERS = {
     "gemini": {
         "client": gemini_client,
         "text_model": "gemini-3.5-flash",
-        "vision_model": "gemini-3.5-flash",  # Gemini tự đọc được ảnh, khỏi cần đổi model
+        "vision_model": "gemini-3.5-flash",
+        "version": "Gemini 3.5 Flash"
     },
     "groq": {
         "client": groq_client,
         "text_model": "llama-3.3-70b-versatile",
-        "vision_model": "qwen/qwen3.6-27b",  # model DUY NHẤT bên Groq đọc được ảnh hiện tại
+        "vision_model": "qwen/qwen3.6-27b",
+        "version": "Llama 3.3 70B & Qwen 3.6 27B"
     },
 }
-DEFAULT_PROVIDER = "gemini"  # đổi thành "groq" nếu muốn Groq làm mặc định lúc bot khởi động
+DEFAULT_PROVIDER = "gemini"
 
-# Bật intents để bot lấy được thông tin Server/Thành viên (phục vụ việc @tag người khác)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
-# Chặn AI vô tình ping @everyone/@role dù danh sách thành viên có trong prompt;
-# vẫn cho phép @tag từng người cụ thể (đúng tính năng yêu cầu).
 SAFE_MENTIONS = discord.AllowedMentions(everyone=False, roles=False, users=True)
 
-bot_client = discord.Client(intents=intents, allowed_mentions=SAFE_MENTIONS)
+# Nâng cấp Client lên Bot để dùng Slash Commands
+bot = commands.Bot(command_prefix="!", intents=intents, allowed_mentions=SAFE_MENTIONS, help_command=None)
 
 # ==========================================
-# 3. BỘ NHỚ SIÊU NHẸ: LỊCH SỬ CHAT + API ĐANG DÙNG CHO MỖI KÊNH
+# 3. BỘ NHỚ & DỮ LIỆU NGƯỜI DÙNG / KÊNH
 # ==========================================
-HISTORY_LENGTH = 10                 # số dòng hội thoại nhớ được mỗi kênh (~5 lượt hỏi-đáp)
-MAX_IMAGES_PER_MESSAGE = 4           # Groq vision tối đa 5 ảnh/lượt, chừa dư 1
-MAX_IMAGE_BYTES = 6 * 1024 * 1024    # bỏ qua ảnh > 6MB để khỏi phình RAM
+HISTORY_LENGTH = 10
+MAX_IMAGES_PER_MESSAGE = 4
+MAX_IMAGE_BYTES = 6 * 1024 * 1024
 MAX_FILE_BYTES = 1_000_000
 MAX_FILE_CHARS = 3000
-MAX_MEMBERS_LISTED = 100             # chỉ liệt kê tối đa 100 thành viên để prompt khỏi quá to
+MAX_MEMBERS_LISTED = 100
 TEXT_FILE_EXTENSIONS = ('.txt', '.py', '.json', '.html', '.md', '.csv', '.js', '.cpp')
 
+# Lịch sử chat theo kênh
 chat_history = defaultdict(lambda: deque(maxlen=HISTORY_LENGTH))
 channel_provider = defaultdict(lambda: DEFAULT_PROVIDER)
 
+# Cài đặt của người dùng
+user_settings = defaultdict(lambda: {
+    "language": "Tiếng Việt",
+    "character": "Bạn là một trợ lý AI thông minh trên Discord, phong cách giống ChatGPT.",
+    "data_saved": True
+})
 
-@bot_client.event
-async def on_ready():
-    print(f'Bot đã đăng nhập thành công với tên: {bot_client.user}')
+start_time = time.time()
 
-
-def strip_mention(text: str) -> str:
-    """Bỏ phần tag bot (<@ID> hoặc <@!ID>) khỏi đầu câu."""
-    return (text.replace(f'<@{bot_client.user.id}>', '')
-                .replace(f'<@!{bot_client.user.id}>', '')
-                .strip())
-
+# ==========================================
+# 4. HÀM TIỆN ÍCH VÀ THÔNG ĐIỆP CHÀO MỪNG
+# ==========================================
+def get_welcome_embed():
+    embed = discord.Embed(
+        title="👋 Chào mừng bạn đến với Bot Chat AI!",
+        description="Rất vui được hỗ trợ bạn. Dưới đây là thông tin về tôi:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="🧠 Mô hình AI", value=f"- **Gemini:** {PROVIDERS['gemini']['version']}\n- **Groq:** {PROVIDERS['groq']['version']}", inline=False)
+    embed.add_field(name="👨‍💻 Hỗ trợ", value="Nếu gặp lỗi hoặc cần giải đáp, liên hệ: **@demtrangtron**", inline=False)
+    embed.add_field(name="📜 Điều Khoản & Bảo Mật", value="[Điều khoản Dịch vụ](https://sites.google.com/view/botchat-privacy-policy/terms-of-service)\n[Chính sách Bảo mật](https://sites.google.com/view/botchat-privacy-policy/trang-ch%E1%BB%A7)", inline=False)
+    embed.set_footer(text="Gõ /help để xem các lệnh hiện có.")
+    return embed
 
 def build_context_block(message: discord.Message) -> str:
-    """Ghép thông tin server + danh sách thành viên để bot @tag đúng người khi cần."""
     if not message.guild:
         return ""
-
-    block = (f"\nBạn đang ở server '{message.guild.name}' "
-             f"({message.guild.member_count} thành viên).")
-
+    block = f"\nBạn đang ở server '{message.guild.name}' ({message.guild.member_count} thành viên)."
     members = [m for m in message.guild.members if not m.bot][:MAX_MEMBERS_LISTED]
     if members:
         listed = "\n".join(f"- {m.display_name}: <@{m.id}>" for m in members)
-        block += (f"\nDanh sách thành viên (tối đa {MAX_MEMBERS_LISTED} người đầu), muốn "
-                  f"@tag ai thì dùng ĐÚNG cú pháp <@ID> tương ứng bên dưới:\n{listed}")
-
-    others = [m for m in message.mentions if m.id != bot_client.user.id]
+        block += f"\nDanh sách thành viên (muốn @tag ai thì dùng cú pháp <@ID>):\n{listed}"
+    others = [m for m in message.mentions if m.id != bot.user.id]
     if others:
         tagged = ", ".join(f"{m.display_name} (<@{m.id}>)" for m in others)
-        block += f"\nNgười dùng vừa tag sẵn trong tin nhắn: {tagged}"
-
+        block += f"\nNgười dùng vừa tag: {tagged}"
     return block
 
+# ==========================================
+# 5. CÁC SỰ KIỆN BOT
+# ==========================================
+@bot.event
+async def on_ready():
+    print(f'Bot đã đăng nhập thành công với tên: {bot.user}')
+    try:
+        synced = await bot.tree.sync()
+        print(f"Đã đồng bộ {len(synced)} lệnh Slash.")
+    except Exception as e:
+        print(f"Lỗi đồng bộ lệnh: {e}")
 
-@bot_client.event
+@bot.event
+async def on_guild_join(guild):
+    # Gửi lời chào khi vào server mới
+    for channel in guild.text_channels:
+        if channel.permissions_for(guild.me).send_messages:
+            await channel.send(embed=get_welcome_embed())
+            break
+
+# ==========================================
+# 6. SLASH COMMANDS (/)
+# ==========================================
+@bot.tree.command(name="reset", description="Xóa toàn bộ dữ liệu lưu trữ và bộ nhớ trò chuyện.")
+async def reset(interaction: discord.Interaction):
+    chat_history[interaction.channel_id].clear()
+    if interaction.user.id in user_settings:
+        del user_settings[interaction.user.id]
+    
+    await interaction.response.send_message("🧹 Dữ liệu của bạn và lịch sử trò chuyện đã được xóa sạch.\n\n*Vui lòng chọn ngôn ngữ mặc định bằng lệnh `/language` nếu cần.*", embed=get_welcome_embed())
+
+@bot.tree.command(name="language", description="Thay đổi ngôn ngữ mặc định của bot.")
+async def language(interaction: discord.Interaction, lang: str):
+    user_settings[interaction.user.id]["language"] = lang
+    await interaction.response.send_message(f"✅ Đã đổi ngôn ngữ mặc định của bạn thành: **{lang}**")
+
+@bot.tree.command(name="character", description="Thiết lập tính cách của bot.")
+async def character(interaction: discord.Interaction, mo_ta: str):
+    user_settings[interaction.user.id]["character"] = mo_ta
+    await interaction.response.send_message(f"🎭 Đã cập nhật tính cách bot thành:\n> {mo_ta}")
+
+@bot.tree.command(name="clear", description="Xóa lịch sử cuộc trò chuyện (giữ nguyên cài đặt).")
+async def clear(interaction: discord.Interaction):
+    chat_history[interaction.channel_id].clear()
+    await interaction.response.send_message("🧹 Đã xóa lịch sử cuộc trò chuyện hiện tại. Các cài đặt ngôn ngữ/tính cách vẫn được giữ nguyên.")
+
+@bot.tree.command(name="settings", description="Hiển thị các cài đặt hiện tại của bạn.")
+async def settings(interaction: discord.Interaction):
+    prefs = user_settings[interaction.user.id]
+    embed = discord.Embed(title="⚙️ Cài đặt của bạn", color=discord.Color.green())
+    embed.add_field(name="Ngôn ngữ", value=prefs['language'], inline=True)
+    embed.add_field(name="Phiên bản Bot", value="v4.2.0", inline=True)
+    embed.add_field(name="Trạng thái lưu dữ liệu", value="Đang lưu cục bộ" if prefs['data_saved'] else "Không lưu", inline=True)
+    embed.add_field(name="Tính cách", value=prefs['character'], inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="export", description="Xuất dữ liệu lưu trữ của bạn dưới dạng file.")
+async def export(interaction: discord.Interaction):
+    prefs = user_settings[interaction.user.id]
+    history = list(chat_history[interaction.channel_id])
+    export_data = {
+        "settings": prefs,
+        "chat_memory": history
+    }
+    file_bytes = io.BytesIO(json.dumps(export_data, ensure_ascii=False, indent=4).encode('utf-8'))
+    file = discord.File(file_bytes, filename=f"export_{interaction.user.id}.json")
+    await interaction.response.send_message("📦 Đây là file xuất dữ liệu của bạn:", file=file)
+
+@bot.tree.command(name="version", description="Hiển thị phiên bản bot hiện tại.")
+async def version(interaction: discord.Interaction):
+    await interaction.response.send_message("**Version:** v4.2.0\n**Last Updated:** 02/08/2026")
+
+@bot.tree.command(name="about", description="Hiển thị thông tin chi tiết về bot.")
+async def about(interaction: discord.Interaction):
+    embed = discord.Embed(title="ℹ️ Về Bot", color=discord.Color.gold())
+    embed.add_field(name="Phiên bản", value="v4.2.0", inline=True)
+    embed.add_field(name="Ngày cập nhật", value="01/08/2026", inline=True) # Theo yêu cầu Source 2
+    embed.add_field(name="Nhà phát triển", value="**@demtrangtron**", inline=False)
+    embed.add_field(name="Tính năng nổi bật", value="- Đọc ảnh, file văn bản, mã nguồn.\n- Đổi AI linh hoạt (Gemini/Groq).\n- Tùy chỉnh tính cách & ngôn ngữ.\n- Dung lượng tối ưu siêu nhẹ (<1GB).", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="support", description="Hiển thị thông tin hỗ trợ.")
+async def support(interaction: discord.Interaction):
+    await interaction.response.send_message("🛠️ **Hỗ trợ kỹ thuật**\nNếu gặp lỗi hoặc cần giải đáp thắc mắc, vui lòng liên hệ: **@demtrangtron**.")
+
+@bot.tree.command(name="ping", description="Kiểm tra độ trễ (ping) hiện tại của bot.")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f"🏓 Pong! Độ trễ: **{round(bot.latency * 1000)}ms**")
+
+@bot.tree.command(name="terms", description="Hiển thị Điều khoản dịch vụ.")
+async def terms(interaction: discord.Interaction):
+    await interaction.response.send_message("📜 **Điều Khoản Dịch Vụ:**\nhttps://sites.google.com/view/botchat-privacy-policy/terms-of-service")
+
+@bot.tree.command(name="privacy", description="Hiển thị Chính sách bảo mật.")
+async def privacy(interaction: discord.Interaction):
+    await interaction.response.send_message("🔒 **Chính Sách Bảo Mật:**\nhttps://sites.google.com/view/botchat-privacy-policy/trang-ch%E1%BB%A7")
+
+@bot.tree.command(name="uptime", description="Hiển thị thời gian bot đã hoạt động.")
+async def uptime(interaction: discord.Interaction):
+    current_time = time.time()
+    difference = int(round(current_time - start_time))
+    text = str(datetime.timedelta(seconds=difference)) if 'datetime' in globals() else f"{difference} giây"
+    # Fallback to simple math if datetime not imported
+    mins, secs = divmod(difference, 60)
+    hours, mins = divmod(mins, 60)
+    days, hours = divmod(hours, 24)
+    await interaction.response.send_message(f"⏱️ Bot đã hoạt động liên tục trong: **{days} ngày, {hours} giờ, {mins} phút**.")
+
+@bot.tree.command(name="stats", description="Hiển thị thống kê của bot.")
+async def stats(interaction: discord.Interaction):
+    guilds = len(bot.guilds)
+    users = sum(g.member_count for g in bot.guilds)
+    await interaction.response.send_message(f"📊 **Thống kê Bot:**\n- Số máy chủ: {guilds}\n- Tổng người dùng: ~{users}")
+
+@bot.tree.command(name="help", description="Danh sách các câu lệnh.")
+async def help_cmd(interaction: discord.Interaction):
+    help_text = (
+        "**Danh sách các câu lệnh Slash (/)**\n"
+        "`/reset` - Đặt lại toàn bộ dữ liệu & bộ nhớ.\n"
+        "`/language <ngôn_ngữ>` - Đổi ngôn ngữ mặc định.\n"
+        "`/character <mô_tả>` - Cài đặt tính cách bot.\n"
+        "`/clear` - Xóa lịch sử chat hiện tại.\n"
+        "`/settings` - Xem cấu hình hiện tại của bạn.\n"
+        "`/export` - Tải xuống file dữ liệu của bạn.\n"
+        "`/about`, `/version`, `/ping`, `/uptime`, `/stats` - Thông tin bot.\n"
+        "`/support`, `/privacy`, `/terms` - Hỗ trợ và chính sách."
+    )
+    await interaction.response.send_message(help_text)
+
+
+# ==========================================
+# 7. XỬ LÝ TIN NHẮN (CHAT VỚI AI)
+# ==========================================
+def strip_mention(text: str) -> str:
+    return (text.replace(f'<@{bot.user.id}>', '')
+                .replace(f'<@!{bot.user.id}>', '')
+                .strip())
+
+@bot.event
 async def on_message(message: discord.Message):
-    if message.author == bot_client.user:
-        return
+    # Cho phép bot process các lệnh prefix cũ (như !gemini, !groq)
+    await bot.process_commands(message)
 
+    if message.author == bot.user:
+        return
     is_dm = isinstance(message.channel, discord.DMChannel)
-    if bot_client.user not in message.mentions and not is_dm:
+    if bot.user not in message.mentions and not is_dm:
         return
 
     channel_id = message.channel.id
     user_text = strip_mention(message.content)
     command = user_text.lower()
 
-    # --- LỆNH "!RESET": XÓA TRÍ NHỚ CUỘC TRÒ CHUYỆN ---
-    if command == "!reset":
-        chat_history[channel_id].clear()
-        await message.reply("🧹 Đã xóa sạch trí nhớ cuộc trò chuyện này. RAM trống trơn!")
-        return
-
-    # --- LỆNH ĐỔI API: !gemini hoặc !groq, áp dụng đến khi đổi lệnh khác ---
+    # Hỗ trợ chuyển đổi nhanh qua prefix
     if command in ("!gemini", "!groq"):
         provider_name = command.lstrip("!")
         channel_provider[channel_id] = provider_name
-        await message.reply(f"✅ Kênh này chuyển sang dùng **{provider_name.upper()}** để "
-                             f"trả lời, cho đến khi bạn gõ lệnh đổi API khác.")
+        await message.reply(f"✅ Kênh này chuyển sang dùng **{provider_name.upper()}** để trả lời.")
         return
 
     provider_name = channel_provider[channel_id]
     provider = PROVIDERS[provider_name]
+    prefs = user_settings[message.author.id]
 
     try:
         await message.add_reaction("⏳")
     except Exception:
         pass
 
-    # --- ĐỌC ẢNH (đổi sang base64 thay vì gửi thẳng link Discord CDN, vì link có
-    #     thể hết hạn hoặc bị AI provider chặn fetch -> lỗi khó hiểu) VÀ FILE ---
+    # Đọc ảnh và file
     image_parts = []
     text_files_content = ""
-
     for attachment in message.attachments:
         if attachment.content_type and attachment.content_type.startswith('image/'):
             if len(image_parts) >= MAX_IMAGES_PER_MESSAGE or attachment.size > MAX_IMAGE_BYTES:
@@ -192,31 +316,25 @@ async def on_message(message: discord.Message):
     if not final_prompt:
         final_prompt = "Hãy phân tích giúp tôi." if image_parts else "Chào bạn"
 
-    # Nội dung gửi API NGAY LƯỢT NÀY - có thể kèm ảnh thật (base64)
     api_content = ([{"type": "text", "text": final_prompt}] + image_parts) if image_parts else final_prompt
-
-    # Nội dung LƯU VÀO LỊCH SỬ: không bao giờ chứa base64 ảnh, để RAM không phình to
-    # theo thời gian và để khỏi gửi lại ảnh/link cũ đã hết hạn ở lượt chat sau.
+    
     history_text = final_prompt
     if image_parts:
         history_text += f"\n[Đã gửi kèm {len(image_parts)} ảnh - không lưu ảnh lại để tiết kiệm RAM]"
 
+    # Tích hợp tính cách và ngôn ngữ người dùng vào Prompt Hệ Thống
     system_prompt = (
-        "Bạn là một trợ lý AI thông minh trên Discord, phong cách giống ChatGPT.\n"
-        f"- Người đang chat với bạn: '{message.author.display_name}' "
-        f"(muốn nhắc lại người này thì dùng <@{message.author.id}>).\n"
-        "- Trả lời NGẮN GỌN, đi thẳng vào trọng tâm, tối đa vài câu trừ khi được yêu cầu "
-        "giải thích dài hơn.\n"
-        "- Trình bày code/văn bản rõ ràng bằng Markdown.\n"
-        "- Có thể đọc ảnh, đọc file người dùng gửi, và @tag bất kỳ ai trong danh sách "
-        "thành viên bằng đúng cú pháp <@ID> khi được yêu cầu."
+        f"{prefs['character']}\n"
+        f"- BẠN LUÔN PHẢI TRẢ LỜI BẰNG NGÔN NGỮ NÀY (TRỪ KHI ĐƯỢC YÊU CẦU KHÁC): **{prefs['language']}**.\n"
+        f"- Người đang chat với bạn: '{message.author.display_name}'.\n"
+        "- Trả lời NGẮN GỌN, đi thẳng vào trọng tâm.\n"
+        "- Trình bày code/văn bản rõ ràng bằng Markdown."
         + build_context_block(message)
     )
 
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(list(chat_history[channel_id]))
     messages.append({"role": "user", "content": api_content})
-
     model_to_use = provider["vision_model"] if image_parts else provider["text_model"]
 
     async with message.channel.typing():
@@ -228,8 +346,6 @@ async def on_message(message: discord.Message):
             )
             bot_reply = response.choices[0].message.content
 
-            # Chỉ lưu vào lịch sử SAU KHI gọi API thành công, tránh để lại một lượt
-            # "user" mồ côi (không có "assistant" đi kèm) mỗi khi API bị lỗi.
             chat_history[channel_id].append({"role": "user", "content": history_text})
             chat_history[channel_id].append({"role": "assistant", "content": bot_reply})
 
@@ -238,24 +354,22 @@ async def on_message(message: discord.Message):
                     await message.channel.send(bot_reply[i:i + 2000])
             else:
                 await message.reply(bot_reply)
-
+                
             try:
-                await message.remove_reaction("⏳", bot_client.user)
+                await message.remove_reaction("⏳", bot.user)
                 await message.add_reaction("✅")
             except Exception:
                 pass
-
         except Exception as e:
             await message.channel.send(f"⚠️ Lỗi từ **{provider_name.upper()}**: {e}")
             try:
-                await message.remove_reaction("⏳", bot_client.user)
+                await message.remove_reaction("⏳", bot.user)
                 await message.add_reaction("❌")
             except Exception:
                 pass
 
-
 # ==========================================
-# 4. CHẠY BOT
+# 8. CHẠY BOT
 # ==========================================
 keep_alive()
-bot_client.run(DISCORD_TOKEN)
+bot.run(DISCORD_TOKEN)
