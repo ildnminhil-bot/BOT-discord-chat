@@ -13,7 +13,7 @@ from flask import Flask
 from openai import OpenAI
 
 # ==========================================
-# 1. WEB SERVER GIỮ BOT SỐNG
+# 1. WEB SERVER GIỮ BOT SỐNGc
 # ==========================================
 web_app = Flask('')
 
