@@ -395,7 +395,7 @@ async def on_message(message: discord.Message):
 # 8. CHẠY BOT
 # ==========================================
 keep_alive()
-bot.run(DISCORD_TOKEN)import os
+bot.run(DISCORD_TOKEN)
 import base64
 import threading
 import time
